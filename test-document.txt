@@ -1,0 +1,10 @@
+This is a simple test document to verify PDF text extraction.
+
+If you can see this text when uploading this file, then PDF extraction is working properly.
+
+Test content:
+- Line 1: Hello World
+- Line 2: PDF text extraction test
+- Line 3: Multiple paragraphs should be preserved
+
+The end.

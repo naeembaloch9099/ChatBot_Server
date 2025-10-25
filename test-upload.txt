@@ -1,0 +1,5 @@
+This is a simple test file to verify that file upload and text extraction is working properly.
+
+The file contains multiple lines and should be read entirely by the upload system.
+
+If you can see this text in the chat response, then file reading is working correctly!
