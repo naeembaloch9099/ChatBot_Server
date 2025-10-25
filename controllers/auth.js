@@ -33,13 +33,6 @@ function createRefreshValue() {
 }
 
 function setAuthCookies(res, accessToken, refreshValue) {
-  res.cookie(COOKIE_NAME, accessToken, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: COOKIE_SECURE,
-    maxAge: ACCESS_COOKIE_MAX_AGE,
-  });
-
   if (refreshValue) {
     res.cookie(REFRESH_COOKIE_NAME, refreshValue, {
       httpOnly: true,
@@ -71,8 +64,7 @@ exports.register = async (req, res, next) => {
       passwordHash,
     });
 
-    // issue tokens
-    const accessToken = signAccessToken(user);
+    // issue only refresh token
     const refreshValue = createRefreshValue();
     const refreshExpiresAt = new Date(Date.now() + REFRESH_TTL_MS);
     await RefreshToken.create({
@@ -81,11 +73,13 @@ exports.register = async (req, res, next) => {
       expiresAt: refreshExpiresAt,
     });
 
-    setAuthCookies(res, accessToken, refreshValue);
+    setAuthCookies(res, null, refreshValue);
 
     res.json({
       ok: true,
       user: { id: user._id, name: user.name, email: user.email },
+      refreshToken: refreshValue,
+      expiresAt: refreshExpiresAt,
     });
   } catch (err) {
     console.error("register error", err);
@@ -107,7 +101,7 @@ exports.login = async (req, res, next) => {
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) return res.status(401).json({ error: "invalid credentials" });
 
-    const accessToken = signAccessToken(user);
+    // issue only refresh token
     const refreshValue = createRefreshValue();
     const refreshExpiresAt = new Date(Date.now() + REFRESH_TTL_MS);
     await RefreshToken.create({
@@ -116,11 +110,13 @@ exports.login = async (req, res, next) => {
       expiresAt: refreshExpiresAt,
     });
 
-    setAuthCookies(res, accessToken, refreshValue);
+    setAuthCookies(res, null, refreshValue);
 
     res.json({
       ok: true,
       user: { id: user._id, name: user.name, email: user.email },
+      refreshToken: refreshValue,
+      expiresAt: refreshExpiresAt,
     });
   } catch (err) {
     console.error("login error", err);
@@ -139,7 +135,6 @@ exports.logout = async (req, res, next) => {
       // ignore
     }
 
-    res.clearCookie(COOKIE_NAME);
     res.clearCookie(REFRESH_COOKIE_NAME);
     res.json({ ok: true });
   } catch (err) {
