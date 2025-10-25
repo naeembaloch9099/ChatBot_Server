@@ -32,7 +32,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 8080;
 
 // MongoDB setup
 const MONGO_URI = process.env.MONGO_URI;

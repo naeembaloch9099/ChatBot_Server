@@ -1,3 +1,13 @@
+// POST /auth/send-otp
+exports.sendOtp = async (req, res) => {
+  const { email } = req.body || {};
+  if (!email) return res.status(400).json({ error: "Email required" });
+  // Simulate OTP generation
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  // In production, send email here
+  console.log(`[send-otp] Sending OTP ${otp} to ${email}`);
+  res.json({ ok: true, otp });
+};
 const User = require("../models/user");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
