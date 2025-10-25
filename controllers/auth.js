@@ -1,13 +1,3 @@
-// POST /auth/send-otp
-exports.sendOtp = async (req, res) => {
-  const { email } = req.body || {};
-  if (!email) return res.status(400).json({ error: "Email required" });
-  // Simulate OTP generation
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  // In production, send email here
-  console.log(`[send-otp] Sending OTP ${otp} to ${email}`);
-  res.json({ ok: true, otp });
-};
 const User = require("../models/user");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
@@ -33,6 +23,13 @@ function createRefreshValue() {
 }
 
 function setAuthCookies(res, accessToken, refreshValue) {
+  res.cookie(COOKIE_NAME, accessToken, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: COOKIE_SECURE,
+    maxAge: ACCESS_COOKIE_MAX_AGE,
+  });
+
   if (refreshValue) {
     res.cookie(REFRESH_COOKIE_NAME, refreshValue, {
       httpOnly: true,
@@ -64,7 +61,8 @@ exports.register = async (req, res, next) => {
       passwordHash,
     });
 
-    // issue only refresh token
+    // issue tokens
+    const accessToken = signAccessToken(user);
     const refreshValue = createRefreshValue();
     const refreshExpiresAt = new Date(Date.now() + REFRESH_TTL_MS);
     await RefreshToken.create({
@@ -73,13 +71,11 @@ exports.register = async (req, res, next) => {
       expiresAt: refreshExpiresAt,
     });
 
-    setAuthCookies(res, null, refreshValue);
+    setAuthCookies(res, accessToken, refreshValue);
 
     res.json({
       ok: true,
       user: { id: user._id, name: user.name, email: user.email },
-      refreshToken: refreshValue,
-      expiresAt: refreshExpiresAt,
     });
   } catch (err) {
     console.error("register error", err);
@@ -101,7 +97,7 @@ exports.login = async (req, res, next) => {
     const ok = await bcrypt.compare(password, user.passwordHash);
     if (!ok) return res.status(401).json({ error: "invalid credentials" });
 
-    // issue only refresh token
+    const accessToken = signAccessToken(user);
     const refreshValue = createRefreshValue();
     const refreshExpiresAt = new Date(Date.now() + REFRESH_TTL_MS);
     await RefreshToken.create({
@@ -110,13 +106,11 @@ exports.login = async (req, res, next) => {
       expiresAt: refreshExpiresAt,
     });
 
-    setAuthCookies(res, null, refreshValue);
+    setAuthCookies(res, accessToken, refreshValue);
 
     res.json({
       ok: true,
       user: { id: user._id, name: user.name, email: user.email },
-      refreshToken: refreshValue,
-      expiresAt: refreshExpiresAt,
     });
   } catch (err) {
     console.error("login error", err);
@@ -135,6 +129,7 @@ exports.logout = async (req, res, next) => {
       // ignore
     }
 
+    res.clearCookie(COOKIE_NAME);
     res.clearCookie(REFRESH_COOKIE_NAME);
     res.json({ ok: true });
   } catch (err) {
@@ -190,4 +185,15 @@ exports.me = async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+};
+
+// POST /auth/send-otp
+exports.sendOtp = async (req, res) => {
+  const { email } = req.body || {};
+  if (!email) return res.status(400).json({ error: "Email required" });
+  // Simulate OTP generation
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  // In production, send email here
+  console.log(`[send-otp] Sending OTP ${otp} to ${email}`);
+  res.json({ ok: true, otp });
 };
