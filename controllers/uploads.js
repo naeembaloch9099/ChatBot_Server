@@ -3,6 +3,7 @@ const mammoth = require("mammoth");
 const XLSX = require("xlsx");
 
 // Extract text from PDF buffer using pdf-parse
+// Returns object with text and isScanned flag
 async function extractTextFromPdf(buffer) {
   try {
     if (!buffer || buffer.length === 0) {
@@ -36,10 +37,19 @@ async function extractTextFromPdf(buffer) {
       console.warn(
         "[PDF] No text extracted - this might be a scanned PDF or image-only PDF"
       );
-      return "This appears to be a scanned PDF or image-based PDF. No text could be extracted automatically.";
+      return {
+        text: "",
+        isScanned: true,
+        pages: data?.numpages || 0,
+        info: "This appears to be a scanned PDF or image-based PDF. No text could be extracted automatically. Consider uploading as images instead for better analysis.",
+      };
     }
 
-    return data.text;
+    return {
+      text: data.text,
+      isScanned: false,
+      pages: data?.numpages || 0,
+    };
   } catch (err) {
     console.error("PDF parse failed:", err);
     throw new Error(`PDF parsing failed: ${err.message}`);
@@ -109,11 +119,13 @@ async function tesseractOcr(buffer) {
 
 // Main handler: accepts multipart files and a 'question' field. Extracts text from supported files,
 // builds a combined context and returns an AI answer (via Gemini) or the extracted text.
+// For images, uses Gemini Vision API directly for better understanding.
 exports.askWithFiles = async (req, res) => {
   try {
     const files = req.files || [];
     const question = req.body.question || "";
     const parts = [];
+    const imageParts = []; // For Gemini Vision API
 
     console.log(
       `[askWithFiles] Processing ${files.length} files for user ${req.user._id}`
@@ -134,13 +146,22 @@ exports.askWithFiles = async (req, res) => {
 
       let text = "";
       let extractionError = null;
+      let isScanned = false;
 
       try {
         if (ext === "pdf") {
-          text = await extractTextFromPdf(f.buffer);
-          console.log(
-            `[askWithFiles] PDF extracted ${text.length} characters from ${name}`
-          );
+          const pdfResult = await extractTextFromPdf(f.buffer);
+          text = pdfResult.text;
+          isScanned = pdfResult.isScanned;
+
+          if (isScanned) {
+            extractionError = pdfResult.info;
+            console.log(`[askWithFiles] PDF is scanned: ${name}`);
+          } else {
+            console.log(
+              `[askWithFiles] PDF extracted ${text.length} characters from ${name}`
+            );
+          }
         } else if (ext === "docx") {
           // DOCX extraction using mammoth
           const result = await mammoth.extractRawText({ buffer: f.buffer });
@@ -167,13 +188,32 @@ exports.askWithFiles = async (req, res) => {
             `[askWithFiles] Text file extracted ${text.length} characters from ${name}`
           );
         } else if (
-          ["jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp"].includes(ext)
+          ["jpg", "jpeg", "png", "webp", "tif", "tiff", "bmp", "gif"].includes(
+            ext
+          )
         ) {
-          // Use OCR.Space with fallback to tesseract.js
-          text = await extractText(f.buffer, name);
-          console.log(
-            `[askWithFiles] OCR extracted ${text.length} characters from ${name}`
-          );
+          // Use Gemini Vision API directly for better understanding
+          console.log(`[askWithFiles] Preparing ${name} for Gemini Vision API`);
+
+          // Determine MIME type
+          const mimeTypes = {
+            jpg: "image/jpeg",
+            jpeg: "image/jpeg",
+            png: "image/png",
+            webp: "image/webp",
+            gif: "image/gif",
+            tif: "image/tiff",
+            tiff: "image/tiff",
+            bmp: "image/bmp",
+          };
+
+          imageParts.push({
+            name,
+            mimeType: mimeTypes[ext] || "image/jpeg",
+            data: f.buffer.toString("base64"),
+          });
+
+          text = `[Image: ${name} - will be analyzed by AI vision]`;
         } else {
           // unknown binary file - skip text extraction
           text = "";
@@ -207,6 +247,9 @@ exports.askWithFiles = async (req, res) => {
     console.log(
       `[askWithFiles] Combined text length: ${combined.length} characters`
     );
+    console.log(
+      `[askWithFiles] Image parts for Vision API: ${imageParts.length}`
+    );
 
     const response = {
       extracted: combined,
@@ -220,20 +263,23 @@ exports.askWithFiles = async (req, res) => {
       })),
     };
 
-    // If there's no Gemini key or no files text, just return the combined text for client-side handling
+    // If there's no Gemini key, just return the combined text for client-side handling
     const geminiKey = process.env.GEMINI_API_KEY;
     if (!geminiKey) {
       console.log("[askWithFiles] No Gemini API key configured");
       return res.json(response);
     }
 
-    if (!combined.trim()) {
-      console.log("[askWithFiles] No text extracted from any files");
+    // Check if we have any content (text or images)
+    const hasContent = combined.trim().length > 0 || imageParts.length > 0;
+
+    if (!hasContent) {
+      console.log("[askWithFiles] No text or images extracted from any files");
       const errorDetails = parts
         .map((p) => `${p.name}: ${p.error || "Unknown error"}`)
         .join("; ");
-      response.error = `No text could be extracted from the uploaded files. Details: ${errorDetails}`;
-      response.answer = `I couldn't extract any readable text from the uploaded files. This might be because:
+      response.error = `No content could be extracted from the uploaded files. Details: ${errorDetails}`;
+      response.answer = `I couldn't extract any readable content from the uploaded files. This might be because:
 
 1. **Scanned PDF**: The PDF contains images/scans rather than selectable text
 2. **Encrypted PDF**: The PDF is password protected or encrypted
@@ -254,20 +300,86 @@ For scanned PDFs, you might need to use OCR (Optical Character Recognition) tool
       return res.json(response);
     }
 
-    // Build a prompt to ask Gemini to answer the question given the extracted context
-    const prompt = `You are given the following extracted text from uploaded files:\n${combined}\n\nAnswer the question succinctly:\n${question}`;
-
-    // Call Gemini (same as controllers/gemini.js)
+    // Build prompt for Gemini with multimodal support
     const axios = require("axios");
     const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`;
+
+    // Build parts array for Gemini API
+    const geminiParts = [];
+
+    // Add the user's question first with appropriate context
+    let promptText = "";
+
+    if (imageParts.length > 0 && !combined.trim()) {
+      // Image-only upload
+      promptText = `I have uploaded ${imageParts.length} image(s) for analysis. Please examine them carefully and answer my question.\n\n`;
+    } else if (imageParts.length > 0 && combined.trim()) {
+      // Mixed upload (text + images)
+      promptText = `I have uploaded files with both text and images:\n\n${combined}\n\nI have also uploaded ${imageParts.length} image(s). Please analyze everything carefully.\n\n`;
+    } else if (combined.trim()) {
+      // Text-only upload
+      promptText = `I have uploaded the following files with extracted text:\n\n${combined}\n\n`;
+    }
+
+    promptText += `Question: ${question}\n\nPlease provide a detailed and accurate answer based on the uploaded content. For math problems in images, transcribe the problem first, then show step-by-step solutions with proper formatting. For images with diagrams or handwriting, describe what you see before answering.`;
+
+    geminiParts.push({ text: promptText });
+
+    // Add all images as inline data
+    for (const img of imageParts) {
+      geminiParts.push({
+        inlineData: {
+          mimeType: img.mimeType,
+          data: img.data,
+        },
+      });
+    }
+
+    console.log(
+      `[askWithFiles] Sending ${geminiParts.length} parts to Gemini (text + ${imageParts.length} images)`
+    );
+    console.log(
+      `[askWithFiles] Prompt text preview:`,
+      promptText.substring(0, 200)
+    );
+
     const forwardRes = await axios.post(
       endpoint,
-      { contents: [{ parts: [{ text: prompt }] }] },
+      {
+        contents: [
+          {
+            parts: geminiParts,
+          },
+        ],
+        generationConfig: {
+          temperature: 0.4, // Lower temperature for more accurate reading
+          topK: 32,
+          topP: 1,
+          maxOutputTokens: 8192,
+        },
+      },
       { headers: { "Content-Type": "application/json" } }
     );
+
     const data = forwardRes.data;
+    console.log(
+      `[askWithFiles] Gemini API response status:`,
+      forwardRes.status
+    );
+    console.log(
+      `[askWithFiles] Gemini API response candidates:`,
+      data?.candidates?.length || 0
+    );
+
     const textResp = data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
+
+    if (!textResp) {
+      console.error(
+        `[askWithFiles] No text in Gemini response. Full response:`,
+        JSON.stringify(data, null, 2)
+      );
+    }
 
     response.answer = textResp;
     console.log(

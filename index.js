@@ -67,6 +67,21 @@ app.use("/api", uploadsRouter);
 try {
   app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
+
+    // Validate email configuration on startup
+    try {
+      const { validateEmailConfig } = require("./utils/email");
+      console.log(`[Startup] 📧 Checking email configuration...`);
+      validateEmailConfig();
+    } catch (emailError) {
+      console.error(
+        `[Startup] ⚠️  Email configuration error:`,
+        emailError.message
+      );
+      console.error(
+        `[Startup] 💡 OTP emails will not work until this is fixed!`
+      );
+    }
   });
 } catch (err) {
   console.error("Failed to start server:", err.message);

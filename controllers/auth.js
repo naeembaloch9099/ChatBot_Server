@@ -8,6 +8,19 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 const COOKIE_NAME = process.env.SESSION_COOKIE || "sid";
 const REFRESH_COOKIE_NAME = process.env.REFRESH_COOKIE || "refresh";
 
+// Temporary OTP storage (in production, use Redis or database)
+const otpStore = new Map(); // email -> { otp, expiresAt, userData }
+
+// Clean up expired OTPs every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [email, data] of otpStore.entries()) {
+    if (data.expiresAt < now) {
+      otpStore.delete(email);
+    }
+  }
+}, 5 * 60 * 1000);
+
 const ACCESS_EXPIRES = process.env.ACCESS_EXPIRES || "30m"; // jwt expiresIn
 const ACCESS_COOKIE_MAX_AGE = 30 * 60 * 1000; // 30 minutes
 const REFRESH_TTL_MS = 7 * 24 * 3600 * 1000; // 7 days
@@ -189,11 +202,144 @@ exports.me = async (req, res, next) => {
 
 // POST /auth/send-otp
 exports.sendOtp = async (req, res) => {
-  const { email } = req.body || {};
-  if (!email) return res.status(400).json({ error: "Email required" });
-  // Simulate OTP generation
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  // In production, send email here
-  console.log(`[send-otp] Sending OTP ${otp} to ${email}`);
-  res.json({ ok: true, otp });
+  try {
+    const { email, name, password } = req.body || {};
+    if (!email) return res.status(400).json({ error: "Email required" });
+
+    // Check if email already exists in database
+    const normalized = String(email).toLowerCase().trim();
+    const existing = await User.findOne({ email: normalized });
+    if (existing) {
+      return res.status(409).json({ error: "Email already in database" });
+    }
+
+    // Generate OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log(`[send-otp] Sending OTP ${otp} to ${email}`);
+
+    // Store OTP temporarily (expires in 10 minutes)
+    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+    otpStore.set(normalized, {
+      otp,
+      expiresAt,
+      userData: { name, password }, // Store signup data for later
+    });
+
+    // Send OTP via email
+    const { sendOTPEmail } = require("../utils/email");
+    const emailResult = await sendOTPEmail(email, otp);
+
+    if (!emailResult.success) {
+      console.error(`[send-otp] ❌ Email sending failed: ${emailResult.error}`);
+      // Remove from store if email failed
+      otpStore.delete(normalized);
+      return res
+        .status(500)
+        .json({ error: "Failed to send verification email" });
+    }
+
+    console.log(`[send-otp] ✅ Email sent successfully to ${email}`);
+
+    // For development, include OTP in response (remove in production)
+    res.json({
+      ok: true,
+      message: "Verification code sent to your email",
+      otp: process.env.NODE_ENV === "development" ? otp : undefined,
+    });
+  } catch (err) {
+    console.error("send-otp error", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// POST /auth/verify-otp
+exports.verifyOtp = async (req, res) => {
+  const { email, otp, code } = req.body || {};
+  const otpCode = otp || code; // Accept both 'otp' and 'code' parameter names
+
+  if (!email || !otpCode) {
+    console.log(
+      `[verify-otp] ❌ Missing parameters: email=${!!email}, otp/code=${!!otpCode}`
+    );
+    return res.status(400).json({ error: "Email and OTP required" });
+  }
+
+  console.log(`[verify-otp] Verifying OTP ${otpCode} for ${email}`);
+
+  try {
+    // Check if user already exists
+    const normalized = String(email).toLowerCase().trim();
+    const existing = await User.findOne({ email: normalized });
+    if (existing) {
+      return res.status(409).json({ error: "Email already in use" });
+    }
+
+    // Verify OTP from store
+    const storedData = otpStore.get(normalized);
+    if (!storedData) {
+      console.log(`[verify-otp] ❌ No OTP data found for ${normalized}`);
+      return res.status(400).json({
+        error: "OTP expired or not found. Please request a new code.",
+      });
+    }
+
+    if (Date.now() > storedData.expiresAt) {
+      console.log(`[verify-otp] ❌ OTP expired for ${normalized}`);
+      otpStore.delete(normalized);
+      return res
+        .status(400)
+        .json({ error: "OTP expired. Please request a new code." });
+    }
+
+    if (storedData.otp !== otpCode.trim()) {
+      console.log(
+        `[verify-otp] ❌ OTP mismatch for ${normalized}. Expected: ${
+          storedData.otp
+        }, Got: ${otpCode.trim()}`
+      );
+      return res.status(400).json({ error: "Invalid OTP code." });
+    }
+
+    console.log(`[verify-otp] ✅ OTP verified successfully for ${normalized}`);
+
+    // OTP verified! Create user with stored data
+    const { userData } = storedData;
+    if (userData && userData.name && userData.password) {
+      const passwordHash = await bcrypt.hash(userData.password, 12);
+      const user = await User.create({
+        name: String(userData.name).trim(),
+        email: normalized,
+        passwordHash,
+      });
+
+      // Clean up OTP from store
+      otpStore.delete(normalized);
+
+      // Issue tokens
+      const accessToken = signAccessToken(user);
+      const refreshValue = createRefreshValue();
+      const refreshExpiresAt = new Date(Date.now() + REFRESH_TTL_MS);
+      await RefreshToken.create({
+        token: refreshValue,
+        user: user._id,
+        expiresAt: refreshExpiresAt,
+      });
+
+      setAuthCookies(res, accessToken, refreshValue);
+
+      res.json({
+        ok: true,
+        user: { id: user._id, name: user.name, email: user.email },
+      });
+    } else {
+      // Missing user data - this shouldn't happen if OTP was requested properly
+      otpStore.delete(normalized);
+      res.status(400).json({
+        error: "Invalid signup data. Please start registration again.",
+      });
+    }
+  } catch (err) {
+    console.error("verify-otp error", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 };

@@ -5,6 +5,7 @@ const requireAuth = require("../middleware/auth");
 
 router.post("/register", auth.register);
 router.post("/send-otp", auth.sendOtp);
+router.post("/verify-otp", auth.verifyOtp);
 router.post("/login", auth.login);
 router.post("/logout", auth.logout);
 router.post("/refresh", auth.refresh);
