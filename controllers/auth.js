@@ -89,6 +89,8 @@ exports.register = async (req, res, next) => {
     res.json({
       ok: true,
       user: { id: user._id, name: user.name, email: user.email },
+      accessToken, // Include token in response for cross-origin deployments
+      refreshToken: refreshValue,
     });
   } catch (err) {
     console.error("register error", err);
@@ -124,6 +126,8 @@ exports.login = async (req, res, next) => {
     res.json({
       ok: true,
       user: { id: user._id, name: user.name, email: user.email },
+      accessToken, // Include token in response for cross-origin deployments
+      refreshToken: refreshValue,
     });
   } catch (err) {
     console.error("login error", err);
