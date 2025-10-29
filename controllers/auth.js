@@ -3,10 +3,14 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const RefreshToken = require("../models/refreshToken");
+const { OAuth2Client } = require("google-auth-library");
 
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 const COOKIE_NAME = process.env.SESSION_COOKIE || "sid";
 const REFRESH_COOKIE_NAME = process.env.REFRESH_COOKIE || "refresh";
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
 // Temporary OTP storage (in production, use Redis or database)
 const otpStore = new Map(); // email -> { otp, expiresAt, userData }
@@ -345,5 +349,90 @@ exports.verifyOtp = async (req, res) => {
   } catch (err) {
     console.error("verify-otp error", err);
     res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// POST /auth/google - Google OAuth login
+exports.googleAuth = async (req, res) => {
+  try {
+    const { credential } = req.body;
+
+    if (!credential) {
+      return res.status(400).json({ error: "Google credential required" });
+    }
+
+    if (!GOOGLE_CLIENT_ID) {
+      console.error("[google-auth] GOOGLE_CLIENT_ID not configured");
+      return res
+        .status(500)
+        .json({ error: "Google OAuth not configured on server" });
+    }
+
+    // Verify the Google token
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+    const googleId = payload.sub;
+    const email = payload.email;
+    const name = payload.name;
+    const picture = payload.picture;
+
+    console.log(`[google-auth] Verified Google user: ${email}`);
+
+    // Check if user exists
+    const normalized = String(email).toLowerCase().trim();
+    let user = await User.findOne({ email: normalized });
+
+    if (!user) {
+      // Create new user for Google sign-in
+      console.log(`[google-auth] Creating new user for ${email}`);
+      user = await User.create({
+        name: name || "Google User",
+        email: normalized,
+        googleId,
+        profilePicture: picture,
+        passwordHash: await bcrypt.hash(
+          crypto.randomBytes(32).toString("hex"),
+          12
+        ), // Random password (not used)
+      });
+    } else {
+      // Update existing user with Google info if not set
+      if (!user.googleId) {
+        user.googleId = googleId;
+        user.profilePicture = picture || user.profilePicture;
+        await user.save();
+      }
+    }
+
+    // Issue tokens
+    const accessToken = signAccessToken(user);
+    const refreshValue = createRefreshValue();
+    const refreshExpiresAt = new Date(Date.now() + REFRESH_TTL_MS);
+    await RefreshToken.create({
+      token: refreshValue,
+      user: user._id,
+      expiresAt: refreshExpiresAt,
+    });
+
+    setAuthCookies(res, accessToken, refreshValue);
+
+    res.json({
+      ok: true,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        picture: user.profilePicture,
+      },
+      accessToken,
+      refreshToken: refreshValue,
+    });
+  } catch (err) {
+    console.error("[google-auth] Error:", err);
+    res.status(401).json({ error: "Invalid Google token" });
   }
 };

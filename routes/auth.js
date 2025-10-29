@@ -9,6 +9,7 @@ router.post("/verify-otp", auth.verifyOtp);
 router.post("/login", auth.login);
 router.post("/logout", auth.logout);
 router.post("/refresh", auth.refresh);
+router.post("/google", auth.googleAuth);
 router.get("/me", requireAuth, auth.me);
 
 module.exports = router;

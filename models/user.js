@@ -13,6 +13,8 @@ const UserSchema = new mongoose.Schema(
     },
     passwordHash: { type: String, required: true },
     verified: { type: Boolean, default: true },
+    googleId: { type: String, sparse: true, unique: true },
+    profilePicture: { type: String },
   },
   { timestamps: true }
 );
