@@ -323,6 +323,13 @@ exports.verifyOtp = async (req, res) => {
       // Clean up OTP from store
       otpStore.delete(normalized);
 
+      // Send welcome email to new email signup users
+      const { sendWelcomeEmail } = require("../utils/email");
+      sendWelcomeEmail(email, userData.name).catch((err) => {
+        console.error(`[verify-otp] Failed to send welcome email:`, err);
+        // Don't block the signup if email fails
+      });
+
       // Issue tokens
       const accessToken = signAccessToken(user);
       const refreshValue = createRefreshValue();
@@ -385,6 +392,7 @@ exports.googleAuth = async (req, res) => {
     // Check if user exists
     const normalized = String(email).toLowerCase().trim();
     let user = await User.findOne({ email: normalized });
+    let isNewUser = false;
 
     if (!user) {
       // Create new user for Google sign-in
@@ -398,6 +406,14 @@ exports.googleAuth = async (req, res) => {
           crypto.randomBytes(32).toString("hex"),
           12
         ), // Random password (not used)
+      });
+      isNewUser = true;
+
+      // Send welcome email to new Google users
+      const { sendWelcomeEmail } = require("../utils/email");
+      sendWelcomeEmail(email, name).catch((err) => {
+        console.error(`[google-auth] Failed to send welcome email:`, err);
+        // Don't block the signup if email fails
       });
     } else {
       // Update existing user with Google info if not set
