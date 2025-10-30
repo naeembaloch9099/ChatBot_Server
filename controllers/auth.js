@@ -452,3 +452,91 @@ exports.googleAuth = async (req, res) => {
     res.status(401).json({ error: "Invalid Google token" });
   }
 };
+
+// PUT /auth/profile - Update user profile
+exports.updateProfile = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthenticated" });
+    }
+
+    const { name } = req.body;
+    const user = await User.findById(req.user._id);
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Update name if provided
+    if (name && name.trim()) {
+      user.name = name.trim();
+    }
+
+    // Update profile picture if uploaded
+    if (req.file) {
+      // In production, you would upload to cloud storage (AWS S3, Cloudinary, etc.)
+      // For now, we'll store the base64 data
+      const base64Image = `data:${
+        req.file.mimetype
+      };base64,${req.file.buffer.toString("base64")}`;
+      user.profilePicture = base64Image;
+    }
+
+    await user.save();
+
+    res.json({
+      ok: true,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
+      },
+    });
+  } catch (err) {
+    console.error("[update-profile] Error:", err);
+    res.status(500).json({ error: "Failed to update profile" });
+  }
+};
+
+// DELETE /auth/account - Delete user account
+exports.deleteAccount = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({ error: "Unauthenticated" });
+    }
+
+    const userId = req.user._id;
+
+    // Delete user's chats and messages
+    const Chat = require("../models/chat");
+    const Message = require("../models/message");
+
+    const userChats = await Chat.find({ user: userId });
+    const chatIds = userChats.map((chat) => chat._id);
+
+    // Delete all messages in user's chats
+    await Message.deleteMany({ chat: { $in: chatIds } });
+
+    // Delete all user's chats
+    await Chat.deleteMany({ user: userId });
+
+    // Delete refresh tokens
+    await RefreshToken.deleteMany({ user: userId });
+
+    // Delete user account
+    await User.findByIdAndDelete(userId);
+
+    // Clear cookies
+    res.clearCookie(COOKIE_NAME);
+    res.clearCookie(REFRESH_COOKIE_NAME);
+
+    res.json({
+      ok: true,
+      message: "Account deleted successfully",
+    });
+  } catch (err) {
+    console.error("[delete-account] Error:", err);
+    res.status(500).json({ error: "Failed to delete account" });
+  }
+};
