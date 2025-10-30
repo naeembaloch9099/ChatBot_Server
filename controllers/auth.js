@@ -392,36 +392,21 @@ exports.googleAuth = async (req, res) => {
     // Check if user exists
     const normalized = String(email).toLowerCase().trim();
     let user = await User.findOne({ email: normalized });
-    let isNewUser = false;
 
     if (!user) {
-      // Create new user for Google sign-in
-      console.log(`[google-auth] Creating new user for ${email}`);
-      user = await User.create({
-        name: name || "Google User",
-        email: normalized,
-        googleId,
-        profilePicture: picture,
-        passwordHash: await bcrypt.hash(
-          crypto.randomBytes(32).toString("hex"),
-          12
-        ), // Random password (not used)
+      // User doesn't exist - require signup first
+      console.log(`[google-auth] User not found: ${email}`);
+      return res.status(403).json({
+        error: "Please sign up first",
+        needsSignup: true,
       });
-      isNewUser = true;
+    }
 
-      // Send welcome email to new Google users
-      const { sendWelcomeEmail } = require("../utils/email");
-      sendWelcomeEmail(email, name).catch((err) => {
-        console.error(`[google-auth] Failed to send welcome email:`, err);
-        // Don't block the signup if email fails
-      });
-    } else {
-      // Update existing user with Google info if not set
-      if (!user.googleId) {
-        user.googleId = googleId;
-        user.profilePicture = picture || user.profilePicture;
-        await user.save();
-      }
+    // Update existing user with Google info if not set
+    if (!user.googleId) {
+      user.googleId = googleId;
+      user.profilePicture = picture || user.profilePicture;
+      await user.save();
     }
 
     // Issue tokens
@@ -450,6 +435,97 @@ exports.googleAuth = async (req, res) => {
   } catch (err) {
     console.error("[google-auth] Error:", err);
     res.status(401).json({ error: "Invalid Google token" });
+  }
+};
+
+// POST /auth/google-signup - Google OAuth signup (creates new account)
+exports.googleSignup = async (req, res) => {
+  try {
+    const { credential } = req.body;
+
+    if (!credential) {
+      return res.status(400).json({ error: "Google credential required" });
+    }
+
+    if (!GOOGLE_CLIENT_ID) {
+      console.error("[google-signup] GOOGLE_CLIENT_ID not configured");
+      return res
+        .status(500)
+        .json({ error: "Google OAuth not configured on server" });
+    }
+
+    // Verify the Google token
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+    const googleId = payload.sub;
+    const email = payload.email;
+    const name = payload.name;
+    const picture = payload.picture;
+
+    console.log(`[google-signup] Verified Google user: ${email}`);
+
+    // Check if user already exists
+    const normalized = String(email).toLowerCase().trim();
+    const existingUser = await User.findOne({ email: normalized });
+
+    if (existingUser) {
+      return res.status(409).json({
+        error: "Email already in use. Please sign in instead.",
+        shouldLogin: true,
+      });
+    }
+
+    // Create new user
+    console.log(`[google-signup] Creating new user for ${email}`);
+    const user = await User.create({
+      name: name || "Google User",
+      email: normalized,
+      googleId,
+      profilePicture: picture,
+      passwordHash: await bcrypt.hash(
+        crypto.randomBytes(32).toString("hex"),
+        12
+      ), // Random password (not used for Google accounts)
+    });
+
+    // Send welcome email to new Google users
+    const { sendWelcomeEmail } = require("../utils/email");
+    sendWelcomeEmail(email, name).catch((err) => {
+      console.error(`[google-signup] Failed to send welcome email:`, err);
+      // Don't block the signup if email fails
+    });
+
+    // Issue tokens
+    const accessToken = signAccessToken(user);
+    const refreshValue = createRefreshValue();
+    const refreshExpiresAt = new Date(Date.now() + REFRESH_TTL_MS);
+    await RefreshToken.create({
+      token: refreshValue,
+      user: user._id,
+      expiresAt: refreshExpiresAt,
+    });
+
+    setAuthCookies(res, accessToken, refreshValue);
+
+    res.json({
+      ok: true,
+      isNewUser: true,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        picture: user.profilePicture,
+      },
+      accessToken,
+      refreshToken: refreshValue,
+    });
+  } catch (err) {
+    console.error("[google-signup] Error:", err);
+    res.status(500).json({ error: "Failed to sign up with Google" });
   }
 };
 

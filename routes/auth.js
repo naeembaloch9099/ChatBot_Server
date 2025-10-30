@@ -26,6 +26,7 @@ router.post("/login", auth.login);
 router.post("/logout", auth.logout);
 router.post("/refresh", auth.refresh);
 router.post("/google", auth.googleAuth);
+router.post("/google-signup", auth.googleSignup);
 router.get("/me", requireAuth, auth.me);
 router.put(
   "/profile",
