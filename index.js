@@ -11,7 +11,21 @@ dotenv.config({ path: path.resolve(__dirname, ".env") });
 
 const app = express();
 const cookieParser = require("cookie-parser");
-app.use(cors({ origin: true, credentials: true }));
+
+// CORS configuration
+const corsOptions = {
+  origin: [
+    "https://chat-bot-frontend-eight-gray.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+  ],
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  optionsSuccessStatus: 200,
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
 
