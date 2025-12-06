@@ -48,7 +48,7 @@ const createTransporter = () => {
     throw new Error("Invalid email configuration in .env file");
   }
 
-  return nodemailer.createTransport({
+  const config = {
     host: process.env.SMTP_HOST || "smtp.gmail.com",
     port: parseInt(process.env.SMTP_PORT) || 465,
     secure: true, // true for 465 (SSL), false for other ports
@@ -56,7 +56,19 @@ const createTransporter = () => {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
     },
+    debug: true, // Enable debug output
+    logger: true, // Log to console
+  };
+
+  console.log("[Email] Creating transporter with config:", {
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+    user: config.auth.user,
+    passLength: config.auth.pass ? config.auth.pass.length : 0,
   });
+
+  return nodemailer.createTransport(config);
 };
 
 // Send OTP email
