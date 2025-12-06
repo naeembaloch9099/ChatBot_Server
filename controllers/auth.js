@@ -616,3 +616,175 @@ exports.deleteAccount = async (req, res) => {
     res.status(500).json({ error: "Failed to delete account" });
   }
 };
+
+// POST /auth/forgot-password - Send OTP for password reset
+exports.forgotPassword = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    // Check if user exists
+    const normalized = String(email).toLowerCase().trim();
+    const user = await User.findOne({ email: normalized });
+
+    if (!user) {
+      return res
+        .status(404)
+        .json({ error: "No account found with this email" });
+    }
+
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log(`[forgot-password] Sending reset OTP ${otp} to ${email}`);
+
+    // Store OTP temporarily (expires in 10 minutes)
+    const expiresAt = Date.now() + 10 * 60 * 1000;
+    otpStore.set(`reset_${normalized}`, {
+      otp,
+      expiresAt,
+      email: normalized,
+    });
+
+    // Send OTP via email
+    const { sendPasswordResetEmail } = require("../utils/email");
+    const emailResult = await sendPasswordResetEmail(email, otp, user.name);
+
+    if (!emailResult.success) {
+      console.error(
+        `[forgot-password] ❌ Email sending failed: ${emailResult.error}`
+      );
+      otpStore.delete(`reset_${normalized}`);
+      return res.status(500).json({ error: "Failed to send reset code email" });
+    }
+
+    console.log(
+      `[forgot-password] ✅ Reset email sent successfully to ${email}`
+    );
+
+    res.json({
+      ok: true,
+      message: "Password reset code sent to your email",
+      otp: process.env.NODE_ENV === "development" ? otp : undefined,
+    });
+  } catch (err) {
+    console.error("[forgot-password] Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// POST /auth/verify-reset-otp - Verify OTP for password reset
+exports.verifyResetOtp = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+
+    if (!email || !otp) {
+      return res.status(400).json({ error: "Email and OTP are required" });
+    }
+
+    const normalized = String(email).toLowerCase().trim();
+    const stored = otpStore.get(`reset_${normalized}`);
+
+    if (!stored) {
+      return res
+        .status(400)
+        .json({ error: "No reset request found or OTP expired" });
+    }
+
+    if (Date.now() > stored.expiresAt) {
+      otpStore.delete(`reset_${normalized}`);
+      return res.status(400).json({ error: "OTP has expired" });
+    }
+
+    if (stored.otp !== otp) {
+      return res.status(400).json({ error: "Invalid OTP" });
+    }
+
+    // Mark OTP as verified (don't delete yet, needed for password reset)
+    otpStore.set(`reset_${normalized}`, {
+      ...stored,
+      verified: true,
+    });
+
+    console.log(`[verify-reset-otp] ✅ OTP verified for ${email}`);
+
+    res.json({
+      ok: true,
+      message: "OTP verified successfully",
+    });
+  } catch (err) {
+    console.error("[verify-reset-otp] Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// POST /auth/reset-password - Reset password after OTP verification
+exports.resetPassword = async (req, res) => {
+  try {
+    const { email, otp, newPassword } = req.body;
+
+    if (!email || !otp || !newPassword) {
+      return res
+        .status(400)
+        .json({ error: "Email, OTP, and new password are required" });
+    }
+
+    if (newPassword.length < 6) {
+      return res
+        .status(400)
+        .json({ error: "Password must be at least 6 characters" });
+    }
+
+    const normalized = String(email).toLowerCase().trim();
+    const stored = otpStore.get(`reset_${normalized}`);
+
+    if (!stored) {
+      return res
+        .status(400)
+        .json({ error: "No reset request found or session expired" });
+    }
+
+    if (!stored.verified) {
+      return res.status(400).json({ error: "Please verify OTP first" });
+    }
+
+    if (Date.now() > stored.expiresAt) {
+      otpStore.delete(`reset_${normalized}`);
+      return res.status(400).json({ error: "Reset session has expired" });
+    }
+
+    if (stored.otp !== otp) {
+      return res.status(400).json({ error: "Invalid OTP" });
+    }
+
+    // Find user and update password
+    const user = await User.findOne({ email: normalized });
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+    user.passwordHash = hashedPassword; // Fixed: Use passwordHash instead of password
+    await user.save();
+
+    // Clear OTP from store
+    otpStore.delete(`reset_${normalized}`);
+
+    // Invalidate all existing refresh tokens for security
+    await RefreshToken.deleteMany({ user: user._id });
+
+    console.log(`[reset-password] ✅ Password reset successfully for ${email}`);
+
+    res.json({
+      ok: true,
+      message:
+        "Password reset successfully. Please login with your new password.",
+    });
+  } catch (err) {
+    console.error("[reset-password] Error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
